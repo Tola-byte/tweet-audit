@@ -1,0 +1,33 @@
+# Environment variables
+.env
+
+# Cursor IDE rules
+.cursorrules
+
+# Database files
+*.db
+*.db-shm
+*.db-wal
+
+# Binary executables
+tweet-audit
+/tweet-audit
+
+# Test coverage
+*.out
+coverage.html
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.log
