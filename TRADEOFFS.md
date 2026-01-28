@@ -1,63 +1,33 @@
-# HERE FOR THIS, I'd be making use of async processing because doing synchronous can cause blocking and timeouts, some archives may be way too large and this will keep the HTTP open which can lead to timeout. 
+## Architecture choices
 
-# so best bet we have to use async with batch processing. 
+Shape is simple on purpose: HTTP API → filestore → worker + SQLite → Gemini scorer.
 
-# Concise ordered steps to build tweet-audit (practical sequence)
+We went for a background-worker setup instead of “do everything in the request” because archives can be big and LLM calls are slow and ratelimited. Keeping the upload request short (store file + create job + return job_id) avoids timeouts and makes the UX predictable. SQLite + local disk are enough for a single-user / small-team tool and keep ops basically at “copy a folder and a binary”.
 
-# Architecture: decide sync vs async upload processing, storage backend (local vs S3), and auth.
-# Upload endpoint + filestore: accept X archive, store it, return StoredFile JSON (id, size, path/url).
-# Parser: unzip / parse X archive formats; extract tweet id, text, created_at, links, attachments.
-# Normalize: convert parsed items into TweetRecord domain objects.
-# Deterministic filters: implement cheap rule-based checks (keywords, profanity lists, age checks) to pre-filter.
-# Scorer abstraction: add Scorer interface so you can swap/mock LLM. Start with a no-op/mock scorer.
-# Gemini integration: implement an adapter that batches prompts, handles rate limits, uses templates, and returns scores/labels.
-# Orchestration pipeline: for each TweetRecord run filters → if uncertain call Scorer → compute final flag + reason.
-# Persist results: store per-tweet score/flags and link to original archive/file.
-# Review UI / export: list flagged tweets, show context, allow export of tweet URLs for manual deletion.
-# Background jobs & reliability: move heavy parsing/LLM work to worker queue, add timeouts/retries.
-# Security & privacy: auth, encryption, log scrubbing, retention policy, consent.
-# Tests, monitoring, and cost controls: unit tests, integration tests with mocked Gemini, metrics on LLM calls/cost.
+Go is a good fit here: standard HTTP server, sane concurrency primitives, and a static binary that runs anywhere without dragging a runtime around.
 
-# TRADEOFFS
+## Concurrency strategy
 
-# Concise pros, cons, and mitigations
+Uploads are synchronous only up to “file saved and job created”. After that:
+- `jobLoop` parses the archive, normalizes tweets, filters, and enqueues Gemini work.
+- `tweetLoop` pulls from a queue and talks to Gemini under rate limiting and a circuit breaker.
 
-# Async processing
+So conceptually: sequential upload, async batch processing. It gives us clear places to cap throughput (queue sizes, rate limiter) without exposing that complexity to the client.
 
-# Pros: decouples upload from heavy work (parsing + LLM), smoother UX, easy to retry/backoff.
-# Cons: more infra (queue/workers), complexity in idempotency and status tracking.
-# Mitigations: start with a simple local queue (channel + worker goroutine), persist job state, add idempotency keys.
-# Local storage
+## Error handling
 
-# Pros: simplest to implement, fast for dev, no external creds/costs.
-# Cons: single-node, not durable across deployments, no CDN, limited scaling, backup responsibility.
-# Mitigations: store under a configurable data/uploads dir, write metadata to a small DB/file, add periodic backups, design FileStore interface so you can swap in S3 later.
-# No auth (MVP)
+For the DB we lean on SQLite WAL + busy_timeout + a small retry wrapper for `SQLITE_BUSY` so “database is locked” turns into a short backoff instead of a crash. For Gemini we do:
+- rate limiter in front
+- circuit breaker around the calls
+- small, bounded retry with backoff for transient errors
 
-# Pros: fastest iteration.
-# Cons: major privacy & security risk — archives contain personal data; anyone hitting the endpoint could upload or download data.
-# Mitigations: restrict to localhost or internal network while iterating; add simple API key or basic auth before any public testing; document the plan to add real auth before wider use.
+Permanent problems (bad key, wrong model, 4xx that are not 429) trip the breaker quickly and we stop wasting calls. Jobs can end in a “failed” state but their partial data stays in the DB so you can still inspect what happened.
 
-# Archive file retention: delete immediately after processing
+## Performance vs safety
 
-# Pros: minimal storage footprint, reduces privacy risk (no archives sitting on disk), forces you to rely on DB for data.
-# Cons: can't reprocess archives if parsing logic changes, harder to debug failed jobs (no source file), no audit trail of original upload.
-# Mitigations: all tweet data persisted to DB before deletion, job metadata kept for debugging, can re-upload if needed. If reprocessing needed, user can re-upload archive.
+We bias toward “safe and understandable” over raw speed:
+- Retweets are dropped early to avoid wasting quota.
+- Deterministic filters are conservative; when in doubt we let Gemini decide.
+- Daily quota and per-minute caps are enforced in code and persisted so a restart does not hammer the API.
 
-# Database choice: SQLite (current) vs MongoDB vs PostgreSQL
-
-# SQLite (current implementation)
-# Pros: zero config, file-based, perfect for MVP, easy backups (just copy file), no server needed.
-# Cons: write contention (single writer), doesn't scale beyond single process, limited concurrent writes, not suitable for distributed workers.
-# When to migrate: >100 concurrent jobs, need multiple worker processes, or distributed architecture.
-
-# PostgreSQL alternative
-# Pros: full ACID transactions, excellent for relationships (jobs → tweets → flagged), powerful SQL queries, mature and battle-tested, better for complex aggregations.
-# Cons: requires server setup, more complex deployment, SQL learning curve, more rigid schema (migrations needed).
-# Best for: when you need strong transactional guarantees, complex queries, or multi-worker setups.
-
-# MongoDB alternative
-# Pros: natural fit for document data (tweets are JSON-like), simpler code (no SQL, just Go structs), flexible schema (easy to evolve), can embed tweets in jobs, better for read-heavy workloads.
-# Cons: limited multi-document transactions (or more complex), no joins (must embed or do application-level), less mature query language for complex aggregations.
-# Best for: when you want simpler code, flexible schema evolution, or document-centric data model. Good fit for this use case since tweets are naturally documents.
-# Tradeoff: if you need atomic saves across multiple documents (e.g., save all tweets + flagged tweets in one transaction), PostgreSQL is stronger. MongoDB supports multi-doc transactions but they're more limited.
+SQLite + local files are a conscious “single-node” tradeoff. For this use case (your own archive, maybe a few jobs) that is fine. If you ever need more concurrency or multiple workers, the same schema and code can move to PostgreSQL without a rewrite.
