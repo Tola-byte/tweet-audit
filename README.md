@@ -4,158 +4,33 @@ This tool processes your X archive, evaluates each tweet against your alignment 
 
 ## Architecture
 
-```mermaid
-graph TB
-    subgraph "API Layer"
-        API[HTTP API Server]
-        Upload[POST /tweets/upload]
-        Status[GET /jobs/:id]
-        List[GET /tweets?job_id=:id]
-        Export[GET /tweets/export?job_id=:id]
-    end
+The system follows a layered architecture with async processing:
 
-    subgraph "Storage Layer"
-        FileStore[Local FileStore]
-        DB[(SQLite Database)]
-    end
+**API Layer**: HTTP endpoints handle uploads, job status checks, and flagged tweet retrieval. Uploads return immediately with a job_id, avoiding long-running requests.
 
-    subgraph "Worker System"
-        JobQueue[Job Queue<br/>chan string]
-        TweetQueue[Tweet Queue<br/>chan QueuedTweet]
-        
-        JobLoop[Job Loop Worker]
-        TweetLoop[Tweet Loop Worker]
-        
-        Parser[Archive Parser]
-        Filters[Deterministic Filters]
-    end
+**Storage Layer**: Local file storage for archives and SQLite for job state, tweets, and flagged results. Both are designed for single-node operation with easy backup.
 
-    subgraph "LLM Scoring Layer"
-        RateLimiter[Rate Limiter<br/>15 req/min]
-        CircuitBreaker[Circuit Breaker]
-        Retry[Exponential Backoff]
-        Gemini[Gemini API<br/>gemini-2.5-flash-lite]
-        MockScorer[Mock Scorer<br/>fallback]
-    end
+**Worker System**: Two background workers process jobs asynchronously:
+- **Job Loop**: Parses archives, applies deterministic filters, enqueues tweets needing LLM review
+- **Tweet Loop**: Processes tweets through Gemini API with rate limiting and circuit breaking
 
-    subgraph "Data Flow"
-        direction TB
-        Tweets[Tweet Records]
-        Flagged[Flagged Tweets]
-        Jobs[Job Status]
-    end
+**LLM Scoring Layer**: Gemini API calls are wrapped in rate limiting (15 req/min), circuit breaker (fails fast on permanent errors), and exponential backoff retries. Falls back to mock scorer if no API key is configured.
 
-    API --> Upload
-    API --> Status
-    API --> List
-    API --> Export
-
-    Upload --> FileStore
-    Upload --> JobQueue
-    
-    FileStore --> Parser
-    JobQueue --> JobLoop
-    
-    JobLoop --> Parser
-    Parser --> Tweets
-    Tweets --> Filters
-    
-    Filters -->|Clear Abuse| Flagged
-    Filters -->|Needs Review| TweetQueue
-    
-    TweetQueue --> TweetLoop
-    TweetLoop --> RateLimiter
-    RateLimiter --> CircuitBreaker
-    CircuitBreaker --> Retry
-    Retry --> Gemini
-    Retry --> MockScorer
-    
-    Gemini -->|Score Result| TweetLoop
-    MockScorer -->|Score Result| TweetLoop
-    
-    TweetLoop -->|Flagged| Flagged
-    TweetLoop -->|Processed| DB
-    
-    JobLoop --> DB
-    TweetLoop --> DB
-    Status --> DB
-    List --> DB
-    Export --> DB
-    
-    DB --> Jobs
-    DB --> Tweets
-    DB --> Flagged
-
-    style API fill:#e1f5ff
-    style JobQueue fill:#fff4e1
-    style TweetQueue fill:#fff4e1
-    style Gemini fill:#ffe1f5
-    style DB fill:#e1ffe1
-    style Flagged fill:#ffe1e1
-```
+**Data Flow**: Tweets flow from parser → filters → either flagged immediately or queued for Gemini → scored → persisted to database. All state is tracked in SQLite for querying and export.
 
 ## Processing Flow
 
-```mermaid
-sequenceDiagram
-    participant Client
-    participant API
-    participant FileStore
-    participant JobQueue
-    participant JobLoop
-    participant Parser
-    participant Filters
-    participant TweetQueue
-    participant TweetLoop
-    participant RateLimiter
-    participant Gemini
-    participant DB
+1. **Upload**: Client uploads archive file via `POST /tweets/upload`. Server saves file, creates job record, enqueues job, returns `job_id` immediately.
 
-    Client->>API: POST /tweets/upload<br/>(archive + criteria)
-    API->>FileStore: Save archive file
-    FileStore-->>API: file_id
-    API->>JobQueue: Enqueue job(file_id, criteria)
-    API-->>Client: 201 {job_id, file_id}
-    
-    JobQueue->>JobLoop: Process job
-    JobLoop->>FileStore: Open archive
-    FileStore-->>JobLoop: Archive data
-    JobLoop->>Parser: Parse archive
-    Parser-->>JobLoop: Tweet records
-    
-    loop For each tweet
-        JobLoop->>Filters: Check deterministic rules
-        alt Clear abuse detected
-            Filters-->>JobLoop: Flag immediately
-            JobLoop->>DB: Save flagged tweet
-        else Needs LLM review
-            JobLoop->>TweetQueue: Enqueue for Gemini
-        end
-    end
-    
-    TweetQueue->>TweetLoop: Process tweet
-    TweetLoop->>RateLimiter: Wait for quota
-    RateLimiter-->>TweetLoop: Proceed
-    TweetLoop->>Gemini: Score tweet (with criteria)
-    Gemini-->>TweetLoop: Score result
-    
-    alt Should flag
-        TweetLoop->>DB: Save flagged tweet
-    end
-    
-    TweetLoop->>DB: Mark tweet processed
-    TweetLoop->>DB: Update job stats
-    
-    Client->>API: GET /jobs/:id
-    API->>DB: Query job status
-    DB-->>API: Job with progress
-    API-->>Client: Job status + metrics
-    
-    Client->>API: GET /tweets?job_id=:id
-    API->>DB: Query flagged tweets
-    DB-->>API: Flagged tweets list
-    API-->>Client: Paginated results
-```
+2. **Archive Processing**: Job worker picks up job, opens archive file, parses ZIP or JS format, extracts tweet records, saves all tweets to database.
+
+3. **Filtering**: For each tweet, deterministic filters check for retweets (skip), clear abuse patterns (flag immediately), or pass to LLM queue.
+
+4. **LLM Scoring**: Tweet worker pulls from queue, waits for rate limiter token, checks circuit breaker, calls Gemini API with moderation criteria, receives score and reason.
+
+5. **Persistence**: If flagged, saves flagged tweet record with score and reason. Marks tweet as processed, updates job statistics (processed_count, flagged_count, gemini_calls).
+
+6. **Query**: Client polls `GET /jobs/:id` for status, then `GET /tweets?job_id=:id` to retrieve flagged tweets, or `GET /tweets/export` to get URLs for deletion.
 
 ## Two-Layer Detection System
 
