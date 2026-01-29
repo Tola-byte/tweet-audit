@@ -16,7 +16,7 @@ func setupTestDB(t *testing.T) (*Repository, func()) {
 	}
 	tmpfile.Close()
 
-	repo, err := NewRepository(tmpfile.Name())
+	repo, err := NewRepository(tmpfile.Name(), 5*time.Second)
 	if err != nil {
 		os.Remove(tmpfile.Name())
 		t.Fatalf("Failed to create repository: %v", err)
@@ -79,9 +79,9 @@ func TestSaveJob_WithCriteria(t *testing.T) {
 	defer cleanup()
 
 	criteria := &model.ModerationCriteria{
-		ForbiddenWords:  []string{"crypto", "NFT"},
+		ForbiddenWords:    []string{"crypto", "NFT"},
 		ProfessionalCheck: true,
-		ExcludePolitics:    true,
+		ExcludePolitics:   true,
 	}
 
 	job := &model.Job{
@@ -172,12 +172,12 @@ func TestSaveTweet(t *testing.T) {
 	defer cleanup()
 
 	tweet := &model.TweetRecord{
-		ID:        "tweet-123",
-		Text:      "Test tweet",
-		CreatedAt: time.Now(),
-		Links:     []string{"https://example.com"},
-		Hashtags:  []string{"#test"},
-		Mentions:  []string{"@user"},
+		ID:          "tweet-123",
+		Text:        "Test tweet",
+		CreatedAt:   time.Now(),
+		Links:       []string{"https://example.com"},
+		Hashtags:    []string{"#test"},
+		Mentions:    []string{"@user"},
 		Attachments: []string{"https://example.com/img.jpg"},
 	}
 

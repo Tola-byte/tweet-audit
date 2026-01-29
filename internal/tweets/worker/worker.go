@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"tweet-audit/internal/config"
 	"tweet-audit/internal/tweets/logger"
 	"tweet-audit/internal/tweets/model"
 	"tweet-audit/internal/tweets/parser"
@@ -27,19 +28,23 @@ type QueuedTweet struct {
 }
 
 type Worker struct {
-	jobQueue       chan string       // Job IDs to process
-	tweetQueue     chan *QueuedTweet // Tweets needing Gemini scoring
-	jobs           sync.Map          // In-memory job cache (also persisted to DB)
-	stop           chan struct{}
-	fileStore      model.FileStore
-	repo           *repository.Repository
-	parser         *parser.Parser
-	scorer         model.Scorer
-	policy         *Policy
-	currentJobID   string // Current job being processed
-	currentJobIDMu sync.Mutex
-	jobUpdateQueue map[string]*model.Job // Batched job updates (jobID -> job)
-	jobUpdateMu    sync.Mutex            // Protects jobUpdateQueue
+	jobQueue        chan string       // Job IDs to process
+	tweetQueue      chan *QueuedTweet // Tweets needing Gemini scoring
+	jobs            sync.Map          // In-memory job cache (also persisted to DB)
+	stop            chan struct{}
+	fileStore       model.FileStore
+	repo            *repository.Repository
+	parser          *parser.Parser
+	scorer          model.Scorer
+	policy          *Policy
+	currentJobID    string // Current job being processed
+	currentJobIDMu  sync.Mutex
+	jobUpdateQueue  map[string]*model.Job // Batched job updates (jobID -> job)
+	jobUpdateMu     sync.Mutex            // Protects jobUpdateQueue
+	dailyQuotaLimit int
+	tweetBatchSize  int
+	activeWork      sync.WaitGroup // Tracks in-flight work
+	shutdownOnce    sync.Once      // Ensures shutdown only happens once
 }
 
 type Policy struct {
@@ -48,15 +53,28 @@ type Policy struct {
 }
 
 func NewWorker(fs model.FileStore, repo *repository.Repository, scorer model.Scorer) *Worker {
+	cfg := config.WorkerConfig{
+		JobQueueSize:      100,
+		TweetQueueSize:    1000,
+		DailyQuotaLimit:   DailyQuotaLimit,
+		TweetBatchSize:    TweetBatchSize,
+		JobUpdateInterval: 5 * time.Second,
+	}
+	return NewWorkerWithConfig(fs, repo, scorer, cfg)
+}
+
+func NewWorkerWithConfig(fs model.FileStore, repo *repository.Repository, scorer model.Scorer, cfg config.WorkerConfig) *Worker {
 	w := &Worker{
-		jobQueue:   make(chan string, 100),
-		tweetQueue: make(chan *QueuedTweet, 1000),
-		stop:       make(chan struct{}),
-		fileStore:  fs,
-		repo:       repo,
-		parser:     parser.NewParser(),
-		scorer:     scorer,
-		policy:     nil,
+		jobQueue:        make(chan string, cfg.JobQueueSize),
+		tweetQueue:      make(chan *QueuedTweet, cfg.TweetQueueSize),
+		stop:            make(chan struct{}),
+		fileStore:       fs,
+		repo:            repo,
+		parser:          parser.NewParser(),
+		scorer:          scorer,
+		policy:          nil,
+		dailyQuotaLimit: cfg.DailyQuotaLimit,
+		tweetBatchSize:  cfg.TweetBatchSize,
 	}
 
 	if scorer != nil {
@@ -70,7 +88,7 @@ func NewWorker(fs model.FileStore, repo *repository.Repository, scorer model.Sco
 
 	go w.jobLoop()
 	go w.tweetLoop()
-	go w.jobUpdateFlusher()
+	go w.jobUpdateFlusherWithInterval(cfg.JobUpdateInterval)
 	w.resumePendingJobs()
 	return w
 }
@@ -137,11 +155,20 @@ func (w *Worker) GetJob(id string) (*model.Job, bool) {
 
 // jobLoop processes job queue: parse archive, apply filters, queue tweets for Gemini
 func (w *Worker) jobLoop() {
+	defer w.activeWork.Done()
+	w.activeWork.Add(1)
+
 	for {
 		select {
-		case id := <-w.jobQueue:
+		case id, ok := <-w.jobQueue:
+			if !ok {
+				logger.Info("Job queue closed, stopping job worker")
+				return
+			}
 			w.processJob(context.Background(), id)
 		case <-w.stop:
+			logger.Info("Job worker received stop signal, draining queue...")
+			w.drainJobQueue()
 			logger.Info("Job worker stopped")
 			return
 		}
@@ -150,21 +177,90 @@ func (w *Worker) jobLoop() {
 
 // tweetLoop processes tweet queue: Gemini scoring with rate limiting and quota tracking
 func (w *Worker) tweetLoop() {
+	defer w.activeWork.Done()
+	w.activeWork.Add(1)
+
 	for {
 		select {
-		case tweet := <-w.tweetQueue:
+		case tweet, ok := <-w.tweetQueue:
+			if !ok {
+				logger.Info("Tweet queue closed, stopping tweet worker")
+				return
+			}
 			w.processTweetWithGemini(context.Background(), tweet)
 		case <-w.stop:
+			logger.Info("Tweet worker received stop signal, draining queue...")
+			w.drainTweetQueue()
 			logger.Info("Tweet worker stopped")
 			return
 		}
 	}
 }
 
-func (w *Worker) Stop() { close(w.stop) }
+// drainJobQueue processes remaining jobs in queue after stop signal
+func (w *Worker) drainJobQueue() {
+	for {
+		select {
+		case id := <-w.jobQueue:
+			logger.Info("Draining job from queue: %s", id)
+			w.processJob(context.Background(), id)
+		default:
+			return
+		}
+	}
+}
+
+// drainTweetQueue processes remaining tweets in queue after stop signal
+func (w *Worker) drainTweetQueue() {
+	for {
+		select {
+		case tweet := <-w.tweetQueue:
+			logger.Info("Draining tweet from queue: %s", tweet.Tweet.ID)
+			w.processTweetWithGemini(context.Background(), tweet)
+		default:
+			return
+		}
+	}
+}
+
+// Stop signals workers to stop accepting new work and begin shutdown
+func (w *Worker) Stop() {
+	w.shutdownOnce.Do(func() {
+		logger.Info("Stopping worker (signaling stop)...")
+		close(w.stop)
+	})
+}
+
+// Shutdown gracefully shuts down the worker, waiting for in-flight work to complete
+// Returns error if shutdown exceeds the provided timeout
+func (w *Worker) Shutdown(ctx context.Context) error {
+	w.Stop()
+
+	logger.Info("Waiting for workers to finish in-flight work...")
+
+	done := make(chan struct{})
+	go func() {
+		w.activeWork.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		logger.Info("All workers finished, flushing final job updates...")
+		w.flushJobUpdates()
+		logger.Info("Worker shutdown complete")
+		return nil
+	case <-ctx.Done():
+		logger.Warn("Worker shutdown timeout exceeded, forcing shutdown")
+		return fmt.Errorf("worker shutdown timeout: %w", ctx.Err())
+	}
+}
 
 // processJob handles the full job processing pipeline
 func (w *Worker) processJob(ctx context.Context, jobID string) {
+	w.activeWork.Add(1)
+	defer w.activeWork.Done()
+
 	w.currentJobIDMu.Lock()
 	w.currentJobID = jobID
 	w.currentJobIDMu.Unlock()
@@ -333,6 +429,9 @@ func (w *Worker) applyFiltersAndQueue(ctx context.Context, job *model.Job, tweet
 
 // processTweetWithGemini: Phase 3 - Process tweets from queue with Gemini (rate limited, quota tracked)
 func (w *Worker) processTweetWithGemini(ctx context.Context, queued *QueuedTweet) {
+	w.activeWork.Add(1)
+	defer w.activeWork.Done()
+
 	jobID := queued.JobID
 	tweet := queued.Tweet
 
@@ -345,8 +444,8 @@ func (w *Worker) processTweetWithGemini(ctx context.Context, queued *QueuedTweet
 	quotaUsed, err := w.repo.GetTodayQuotaUsage()
 	if err != nil {
 		logger.Warn("Failed to check quota: %v", err)
-	} else if quotaUsed >= DailyQuotaLimit {
-		logger.Warn("Daily quota reached (%d/%d), pausing job", quotaUsed, DailyQuotaLimit)
+	} else if quotaUsed >= w.dailyQuotaLimit {
+		logger.Warn("Daily quota reached (%d/%d), pausing job", quotaUsed, w.dailyQuotaLimit)
 		job, _ := w.repo.GetJob(jobID)
 		if job != nil {
 			job.Status = model.JobPausedQuota
@@ -422,7 +521,6 @@ func (w *Worker) processTweetWithGemini(ctx context.Context, queued *QueuedTweet
 	w.repo.MarkTweetProcessed(jobID, tweet.ID)
 }
 
-
 func (w *Worker) updateJob(job *model.Job) {
 	job.UpdatedAt = time.Now()
 
@@ -440,7 +538,12 @@ func (w *Worker) updateJob(job *model.Job) {
 // jobUpdateFlusher periodically flushes job updates to database
 // Runs every 2 seconds to reduce write frequency
 func (w *Worker) jobUpdateFlusher() {
-	ticker := time.NewTicker(2 * time.Second)
+	w.jobUpdateFlusherWithInterval(2 * time.Second)
+}
+
+// jobUpdateFlusherWithInterval periodically flushes job updates to database with configurable interval
+func (w *Worker) jobUpdateFlusherWithInterval(interval time.Duration) {
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
 	for {

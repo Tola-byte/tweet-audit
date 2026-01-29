@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"tweet-audit/internal/config"
 	"tweet-audit/internal/tweets/logger"
 	"tweet-audit/internal/tweets/model"
 )
@@ -33,24 +34,50 @@ type GeminiScorer struct {
 
 // NewGeminiScorer creates a new Gemini-based scorer with production patterns
 func NewGeminiScorer(apiKey string) (*GeminiScorer, error) {
-	if apiKey == "" {
+	cfg := config.GeminiConfig{
+		APIKey:          apiKey,
+		Model:           "gemini-2.5-flash-lite",
+		RateLimitPerMin: 15,
+		MaxRetries:      3,
+		RetryBackoff:    1 * time.Second,
+		Timeout:         30 * time.Second,
+		CircuitBreaker: config.CircuitBreakerConfig{
+			FailureThreshold: 5,
+			SuccessThreshold: 2,
+			OpenTimeout:      30 * time.Second,
+			HalfOpenTimeout:  10 * time.Second,
+		},
+	}
+	return NewGeminiScorerWithConfig(cfg)
+}
+
+// NewGeminiScorerWithConfig creates a new Gemini-based scorer with config
+func NewGeminiScorerWithConfig(cfg config.GeminiConfig) (*GeminiScorer, error) {
+	if cfg.APIKey == "" {
 		return nil, fmt.Errorf("GEMINI_API_KEY is required")
 	}
 
-	rateLimiter := NewRateLimiter(15, time.Minute)
-	circuitBreaker := NewCircuitBreaker(5, 2, 30*time.Second, 10*time.Second)
+	rateLimiter := NewRateLimiter(cfg.RateLimitPerMin, time.Minute)
+	circuitBreaker := NewCircuitBreaker(
+		cfg.CircuitBreaker.FailureThreshold,
+		cfg.CircuitBreaker.SuccessThreshold,
+		cfg.CircuitBreaker.OpenTimeout,
+		cfg.CircuitBreaker.HalfOpenTimeout,
+	)
+
+	apiURL := fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent", cfg.Model)
 
 	return &GeminiScorer{
-		apiKey: apiKey,
+		apiKey: cfg.APIKey,
 		client: &http.Client{
-			Timeout: 30 * time.Second,
+			Timeout: cfg.Timeout,
 		},
-		model:          "gemini-2.5-flash-lite",
-		apiURL:         "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent",
+		model:          cfg.Model,
+		apiURL:         apiURL,
 		rateLimiter:    rateLimiter,
 		circuitBreaker: circuitBreaker,
-		maxRetries:     3,
-		retryBackoff:   1 * time.Second,
+		maxRetries:     cfg.MaxRetries,
+		retryBackoff:   cfg.RetryBackoff,
 		criteria:       model.DefaultCriteria(),
 	}, nil
 }

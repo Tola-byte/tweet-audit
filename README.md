@@ -20,7 +20,7 @@ The system follows a layered architecture with async processing:
 
 ## Processing Flow
 
-1. **Upload**: Client uploads archive file via `POST /tweets/upload`. Server saves file, creates job record, enqueues job, returns `job_id` immediately.
+1. **Upload**: Client uploads archive file via `POST /tweets/upload`. Server saves file, creates job record, enqueues job using a channel, returns `job_id` immediately.
 
 2. **Archive Processing**: Job worker picks up job, opens archive file, parses ZIP or JS format, extracts tweet records, saves all tweets to database.
 

@@ -13,13 +13,18 @@ import (
 )
 
 type Handler struct {
-	svc       *service.Service
-	fileStore model.FileStore
-	worker    *worker.Worker
+	svc           *service.Service
+	fileStore     model.FileStore
+	worker        *worker.Worker
+	maxUploadSize int64
 }
 
 func NewHandler(svc *service.Service, fs model.FileStore, w *worker.Worker) *Handler {
-	return &Handler{svc: svc, fileStore: fs, worker: w}
+	return &Handler{svc: svc, fileStore: fs, worker: w, maxUploadSize: 0}
+}
+
+func NewHandlerWithConfig(svc *service.Service, fs model.FileStore, w *worker.Worker, maxUploadSize int64) *Handler {
+	return &Handler{svc: svc, fileStore: fs, worker: w, maxUploadSize: maxUploadSize}
 }
 
 func (h *Handler) Register(mux *http.ServeMux) {
@@ -114,7 +119,10 @@ func (h *Handler) Upload(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	logger.Info("Upload request received")
 
-	maxUploadSize := int64(500 << 20)
+	maxUploadSize := h.maxUploadSize
+	if maxUploadSize == 0 {
+		maxUploadSize = int64(500 << 20) // Default 500MB
+	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxUploadSize)
 
 	if err := r.ParseMultipartForm(maxUploadSize); err != nil {

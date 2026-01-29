@@ -17,7 +17,7 @@ func setupTestService(t *testing.T) (*Service, func()) {
 	}
 	tmpfile.Close()
 
-	repo, err := repository.NewRepository(tmpfile.Name())
+	repo, err := repository.NewRepository(tmpfile.Name(), 5*time.Second)
 	if err != nil {
 		os.Remove(tmpfile.Name())
 		t.Fatalf("Failed to create repository: %v", err)

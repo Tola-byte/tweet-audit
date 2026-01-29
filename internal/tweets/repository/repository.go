@@ -18,8 +18,9 @@ type Repository struct {
 
 // NewRepository creates a new repository with SQLite database
 // dbPath is the path to the SQLite database file (e.g., "data/tweet-audit.db")
-func NewRepository(dbPath string) (*Repository, error) {
-	db, err := initDB(dbPath)
+// busyTimeout is the SQLite busy timeout duration
+func NewRepository(dbPath string, busyTimeout time.Duration) (*Repository, error) {
+	db, err := initDB(dbPath, busyTimeout)
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize database: %w", err)
 	}

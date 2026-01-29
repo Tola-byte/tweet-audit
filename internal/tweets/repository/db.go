@@ -5,12 +5,13 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	_ "modernc.org/sqlite"
 )
 
 // initDB initializes the SQLite database and creates tables if they don't exist
-func initDB(dbPath string) (*sql.DB, error) {
+func initDB(dbPath string, busyTimeout time.Duration) (*sql.DB, error) {
 	// Ensure directory exists
 	dir := filepath.Dir(dbPath)
 	if dir != "" && dir != "." {
@@ -19,9 +20,10 @@ func initDB(dbPath string) (*sql.DB, error) {
 		}
 	}
 
+	timeoutMs := int(busyTimeout.Milliseconds())
 	// Enable WAL mode for better concurrency (allows multiple readers + one writer)
 	// Use query parameter to enable WAL mode
-	db, err := sql.Open("sqlite", dbPath+"?_journal_mode=WAL&_busy_timeout=5000")
+	db, err := sql.Open("sqlite", fmt.Sprintf("%s?_journal_mode=WAL&_busy_timeout=%d", dbPath, timeoutMs))
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
@@ -38,8 +40,8 @@ func initDB(dbPath string) (*sql.DB, error) {
 		return nil, fmt.Errorf("failed to enable WAL mode: %w", err)
 	}
 
-	// Set busy timeout to 5 seconds (retry for up to 5s on lock)
-	if _, err := db.Exec("PRAGMA busy_timeout=5000"); err != nil {
+	// Set busy timeout (retry for up to timeout duration on lock)
+	if _, err := db.Exec(fmt.Sprintf("PRAGMA busy_timeout=%d", timeoutMs)); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("failed to set busy timeout: %w", err)
 	}
