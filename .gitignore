@@ -1,9 +1,6 @@
 # Environment variables
 .env
 
-# Cursor IDE rules
-.cursorrules
-
 # Database files
 *.db
 *.db-shm
