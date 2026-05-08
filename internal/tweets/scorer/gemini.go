@@ -76,6 +76,7 @@ func NewGeminiScorerWithConfig(cfg config.GeminiConfig) (*GeminiScorer, error) {
 		apiURL:         apiURL,
 		rateLimiter:    rateLimiter,
 		circuitBreaker: circuitBreaker,
+		semaphore:      make(chan struct{}, 10),
 		maxRetries:     cfg.MaxRetries,
 		retryBackoff:   cfg.RetryBackoff,
 		criteria:       model.DefaultCriteria(),
@@ -97,24 +98,55 @@ func (g *GeminiScorer) Score(ctx context.Context, tweet *model.TweetRecord) (*mo
 
 	var lastErr error
 	backoff := g.retryBackoff
+	rateLimitBackoff := 60 * time.Second
 
 	for attempt := 0; attempt <= g.maxRetries; attempt++ {
 		var result *model.ScoreResult
 
 		err := g.circuitBreaker.CallWithCriticalError(ctx, func() error {
 			if err := g.rateLimiter.Wait(ctx); err != nil {
+				logger.WithFields(map[string]interface{}{
+					"tweet_id": tweet.ID,
+					"attempt":  attempt,
+					"error":    err.Error(),
+				}).Error("Score: rate limiter blocked — context cancelled or timed out before acquiring token")
 				return err
 			}
 
 			select {
 			case g.semaphore <- struct{}{}:
+				logger.WithFields(map[string]interface{}{
+					"tweet_id":      tweet.ID,
+					"attempt":       attempt,
+					"semaphore_len": len(g.semaphore),
+					"semaphore_cap": cap(g.semaphore),
+				}).Debug("Score: semaphore acquired, making API call")
 				defer func() { <-g.semaphore }()
 			case <-ctx.Done():
+				logger.WithFields(map[string]interface{}{
+					"tweet_id": tweet.ID,
+					"attempt":  attempt,
+					"error":    ctx.Err().Error(),
+				}).Error("Score: context cancelled waiting for semaphore — API call never made")
 				return ctx.Err()
 			}
 
 			var apiErr error
 			result, apiErr = g.makeAPICall(ctx, tweet, prompt)
+			if apiErr != nil {
+				logger.WithFields(map[string]interface{}{
+					"tweet_id": tweet.ID,
+					"attempt":  attempt,
+					"error":    apiErr.Error(),
+				}).Error("Score: API call failed")
+			} else {
+				logger.WithFields(map[string]interface{}{
+					"tweet_id":    tweet.ID,
+					"attempt":     attempt,
+					"should_flag": result.ShouldFlag,
+					"score":       result.Score,
+				}).Debug("Score: API call succeeded")
+			}
 			return apiErr
 		}, func(err error) bool {
 			if httpErr, ok := err.(*HTTPError); ok {
@@ -155,11 +187,23 @@ func (g *GeminiScorer) Score(ctx context.Context, tweet *model.TweetRecord) (*mo
 			if attempt < g.maxRetries {
 				var retryDelay time.Duration
 				if httpErr, ok := err.(*HTTPError); ok && httpErr.StatusCode == 429 {
-					retryDelay = 60 * time.Second
+					if strings.Contains(httpErr.Body, "RESOURCE_EXHAUSTED") {
+						logger.WithFields(map[string]interface{}{
+							"tweet_id": tweet.ID,
+						}).Error("Daily quota exhausted — will pause until midnight UTC")
+						return nil, ErrDailyQuotaExceeded
+					}
+					retryDelay = rateLimitBackoff
+					rateLimitBackoff *= 2
+					if rateLimitBackoff > 5*time.Minute {
+						rateLimitBackoff = 5 * time.Minute
+					}
 					logger.WithFields(map[string]interface{}{
-						"tweet_id": tweet.ID,
-						"attempt":  attempt + 1,
-					}).Warn("Rate limit exceeded (429) - pausing for 60 seconds before retry")
+						"tweet_id":      tweet.ID,
+						"attempt":       attempt + 1,
+						"retry_delay_s": retryDelay.Seconds(),
+						"next_delay_s":  rateLimitBackoff.Seconds(),
+					}).Warn("Rate limit exceeded (429) - backing off before retry")
 				} else {
 					// Other retryable errors: exponential backoff
 					retryDelay = backoff
@@ -189,6 +233,10 @@ func (g *GeminiScorer) Score(ctx context.Context, tweet *model.TweetRecord) (*mo
 
 	return nil, fmt.Errorf("max retries exceeded: %w", lastErr)
 }
+
+// ErrDailyQuotaExceeded is returned when Gemini's daily free-tier quota is exhausted.
+// Unlike a burst 429, retrying won't help — the quota resets at midnight UTC.
+var ErrDailyQuotaExceeded = fmt.Errorf("gemini daily quota exceeded — quota resets at midnight UTC")
 
 // HTTPError represents an HTTP error from Gemini API
 type HTTPError struct {

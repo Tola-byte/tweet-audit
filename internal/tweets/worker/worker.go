@@ -13,6 +13,7 @@ import (
 	"tweet-audit/internal/tweets/model"
 	"tweet-audit/internal/tweets/parser"
 	"tweet-audit/internal/tweets/repository"
+	"tweet-audit/internal/tweets/scorer"
 	"tweet-audit/internal/tweets/util"
 )
 
@@ -473,6 +474,41 @@ func (w *Worker) processTweetWithGemini(ctx context.Context, queued *QueuedTweet
 	// Score with Gemini
 	scoreResult, err := w.scorer.Score(ctx, tweet)
 	if err != nil {
+		if err == scorer.ErrDailyQuotaExceeded {
+			job.Status = model.JobPausedQuota
+			job.UpdatedAt = time.Now()
+			w.updateJob(job)
+
+			now := time.Now().UTC()
+			midnight := time.Date(now.Year(), now.Month(), now.Day()+1, 0, 1, 0, 0, time.UTC)
+			resumeIn := time.Until(midnight)
+			logger.WithFields(map[string]interface{}{
+				"job_id":     jobID,
+				"resume_at":  midnight.Format(time.RFC3339),
+				"resume_in":  resumeIn.Round(time.Minute).String(),
+			}).Warn("Job paused — daily Gemini quota exhausted, sleeping until midnight UTC")
+
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(resumeIn):
+			}
+
+			// Re-queue this tweet and resume the job
+			job.Status = model.JobRunning
+			job.UpdatedAt = time.Now()
+			w.updateJob(job)
+			logger.WithFields(map[string]interface{}{
+				"job_id":   jobID,
+				"tweet_id": tweet.ID,
+			}).Info("Quota reset — resuming job, re-queuing tweet")
+			select {
+			case w.tweetQueue <- queued:
+			case <-ctx.Done():
+			}
+			return
+		}
+
 		logger.WithFields(map[string]interface{}{
 			"tweet_id": tweet.ID,
 			"job_id":   jobID,

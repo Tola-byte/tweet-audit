@@ -29,13 +29,12 @@ func NewRateLimiter(maxTokens int, refillInterval time.Duration) *RateLimiter {
 // Wait blocks until a token is available or context is cancelled
 func (rl *RateLimiter) Wait(ctx context.Context) error {
 	rl.mu.Lock()
-	defer rl.mu.Unlock()
 
 	// Refill tokens based on time passed
 	now := time.Now()
 	elapsed := now.Sub(rl.lastRefill)
 	tokensToAdd := int(elapsed / rl.refillRate)
-	
+
 	if tokensToAdd > 0 {
 		rl.tokens = min(rl.tokens+tokensToAdd, rl.maxTokens)
 		rl.lastRefill = now
@@ -44,10 +43,11 @@ func (rl *RateLimiter) Wait(ctx context.Context) error {
 	// If we have tokens, use one
 	if rl.tokens > 0 {
 		rl.tokens--
+		rl.mu.Unlock()
 		return nil
 	}
 
-	// No tokens available, wait for next refill
+	// No tokens available, unlock and wait for next refill
 	waitTime := rl.refillRate - elapsed
 	rl.mu.Unlock()
 
@@ -56,15 +56,9 @@ func (rl *RateLimiter) Wait(ctx context.Context) error {
 		return ctx.Err()
 	case <-time.After(waitTime):
 		rl.mu.Lock()
-		rl.tokens = rl.maxTokens - 1 // Use one token
+		rl.tokens = rl.maxTokens - 1
 		rl.lastRefill = time.Now()
+		rl.mu.Unlock()
 		return nil
 	}
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }
