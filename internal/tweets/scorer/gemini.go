@@ -187,7 +187,11 @@ func (g *GeminiScorer) Score(ctx context.Context, tweet *model.TweetRecord) (*mo
 			if attempt < g.maxRetries {
 				var retryDelay time.Duration
 				if httpErr, ok := err.(*HTTPError); ok && httpErr.StatusCode == 429 {
-					if strings.Contains(httpErr.Body, "RESOURCE_EXHAUSTED") {
+					if strings.Contains(httpErr.Body, "RESOURCE_EXHAUSTED") ||
+					strings.Contains(httpErr.Body, "quota exceeded") ||
+					strings.Contains(httpErr.Body, "Quota exceeded") ||
+					strings.Contains(httpErr.Body, "daily quota") ||
+					strings.Contains(httpErr.Body, "Daily quota") {
 						logger.WithFields(map[string]interface{}{
 							"tweet_id": tweet.ID,
 						}).Error("Daily quota exhausted — will pause until midnight UTC")
@@ -336,9 +340,9 @@ func (g *GeminiScorer) makeAPICall(ctx context.Context, tweet *model.TweetRecord
 			errorMsg = fmt.Sprintf("Not found (404) - Model '%s' not found. Check if model name is correct. Response: %s", g.model, bodyStr)
 			isCritical = true
 		case 429:
-			errorMsg = "Rate limit exceeded (429) - Too many requests. Pausing for 60 seconds before retry."
-			// 429 is not critical (we'll retry), but we should pause longer
-			// The retry logic will handle the backoff
+			// Preserve the raw body so Score() can detect RESOURCE_EXHAUSTED (daily quota)
+			// vs a burst rate limit, which are both 429 but handled differently.
+			errorMsg = bodyStr
 		case 500, 502, 503, 504:
 			errorMsg = fmt.Sprintf("Server error (%d) - Gemini API is temporarily unavailable. Response: %s", resp.StatusCode, bodyStr)
 		default:

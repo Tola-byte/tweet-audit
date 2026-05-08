@@ -373,11 +373,20 @@ func (w *Worker) applyFiltersAndQueue(ctx context.Context, job *model.Job, tweet
 	needsGeminiCount := 0
 	flaggedCount := 0
 
-	logCtx.Info("Applying deterministic filters")
-	for _, tweet := range tweets {
-		filterResult := w.applyFilters(tweet)
+	skipDeterministic := job.Criteria == nil
+	if skipDeterministic {
+		logCtx.Info("No criteria provided — skipping deterministic filters, sending all tweets to Gemini")
+	} else {
+		logCtx.Info("Applying deterministic filters")
+	}
 
-		if filterResult.ShouldFlag {
+	for _, tweet := range tweets {
+		var filterResult *FilterResult
+		if !skipDeterministic {
+			filterResult = w.applyFilters(tweet)
+		}
+
+		if filterResult != nil && filterResult.ShouldFlag {
 			// Flagged by deterministic filter - save immediately
 			flaggedCount++
 			ft := &model.FlaggedTweet{
@@ -483,9 +492,12 @@ func (w *Worker) processTweetWithGemini(ctx context.Context, queued *QueuedTweet
 			midnight := time.Date(now.Year(), now.Month(), now.Day()+1, 0, 1, 0, 0, time.UTC)
 			resumeIn := time.Until(midnight)
 			logger.WithFields(map[string]interface{}{
-				"job_id":     jobID,
-				"resume_at":  midnight.Format(time.RFC3339),
-				"resume_in":  resumeIn.Round(time.Minute).String(),
+				"job_id":        jobID,
+				"gemini_calls":  job.GeminiCalls,
+				"processed":     job.ProcessedCount,
+				"total":         job.TotalCount,
+				"resume_at":     midnight.Format(time.RFC3339),
+				"resume_in":     resumeIn.Round(time.Minute).String(),
 			}).Warn("Job paused — daily Gemini quota exhausted, sleeping until midnight UTC")
 
 			select {
