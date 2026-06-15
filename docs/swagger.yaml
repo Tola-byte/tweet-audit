@@ -1,0 +1,394 @@
+definitions:
+  model.ExportTweetsResponse:
+    properties:
+      count:
+        type: integer
+      job_id:
+        type: string
+      urls:
+        items:
+          type: string
+        type: array
+    type: object
+  model.FlaggedTweet:
+    description: A tweet that was flagged for deletion based on moderation criteria.
+      Includes the tweet content, reason for flagging, and URL for manual deletion.
+    properties:
+      created_at:
+        description: When the tweet was originally posted
+        example: "2023-04-15T10:30:00Z"
+        type: string
+      filter_reason:
+        description: 'Which filter caught it: "llm_scorer" (Gemini) or "blocked_phrase"
+          (deterministic)'
+        enum:
+        - llm_scorer
+        - blocked_phrase
+        example: llm_scorer
+        type: string
+      flagged_at:
+        description: When the tweet was flagged by the system
+        example: "2024-01-18T12:45:30Z"
+        type: string
+      id:
+        description: Internal unique identifier
+        example: internal-uuid-123
+        type: string
+      job_id:
+        description: ID of the job that processed this tweet
+        example: job-abc123
+        type: string
+      reason:
+        description: Explanation of why the tweet was flagged
+        example: Contains severe profanity used aggressively
+        type: string
+      score:
+        description: Confidence score (0.0-1.0, higher = more likely to flag)
+        example: 0.85
+        type: number
+      text:
+        description: Full text of the tweet
+        example: This is a problematic tweet
+        type: string
+      tweet_id:
+        description: Original Twitter/X tweet ID
+        example: "1649447064454017026"
+        type: string
+      url:
+        description: Tweet URL for manual deletion
+        example: https://twitter.com/i/web/status/1649447064454017026
+        type: string
+    type: object
+  model.Job:
+    description: Job status and progress information. Includes processing metrics
+      and the moderation criteria used.
+    properties:
+      created_at:
+        description: When the job was created
+        example: "2024-01-18T10:30:00Z"
+        type: string
+      criteria:
+        $ref: '#/definitions/model.ModerationCriteria'
+        description: Moderation criteria used for this job (if custom criteria provided)
+      error:
+        description: Error message (only present if status is "failed")
+        example: Failed to parse archive
+        type: string
+      file_id:
+        description: ID of the uploaded archive file
+        example: file-xyz
+        type: string
+      flagged_count:
+        description: Number of tweets flagged for deletion
+        example: 45
+        type: integer
+      gemini_calls:
+        description: Number of Gemini API calls made for this job
+        example: 1200
+        type: integer
+      id:
+        description: Unique job identifier
+        example: abc123
+        type: string
+      processed_count:
+        description: Number of tweets processed so far
+        example: 1500
+        type: integer
+      result:
+        $ref: '#/definitions/model.JobResult'
+        description: Final job result (only present when status is "done")
+      status:
+        description: Current job status
+        enum:
+        - queued
+        - running
+        - done
+        - failed
+        - paused_quota
+        - paused_manual
+        example: running
+        type: string
+      total_count:
+        description: Total number of tweets to process
+        example: 2000
+        type: integer
+      updated_at:
+        description: When the job was last updated
+        example: "2024-01-18T10:45:00Z"
+        type: string
+    type: object
+  model.JobResult:
+    properties:
+      flagged_count:
+        description: Number of tweets flagged
+        example: 45
+        type: integer
+    type: object
+  model.ListTweetsResponse:
+    properties:
+      pagination:
+        properties:
+          page:
+            type: integer
+          page_size:
+            type: integer
+          total:
+            type: integer
+          total_pages:
+            type: integer
+        type: object
+      tweets:
+        items:
+          $ref: '#/definitions/model.FlaggedTweet'
+        type: array
+    type: object
+  model.ModerationCriteria:
+    description: Custom moderation rules passed to Gemini AI to guide tweet evaluation.
+      All fields are optional. If not provided, default criteria will be used.
+    properties:
+      exclude_harassment:
+        description: 'If true, flags harassment or targeted abuse (default: true)'
+        example: true
+        type: boolean
+      exclude_hate_speech:
+        description: 'If true, flags hate speech or discrimination targeting groups
+          (default: true)'
+        example: true
+        type: boolean
+      exclude_politics:
+        description: If true, flags political content or statements
+        example: true
+        type: boolean
+      exclude_profanity:
+        description: 'If true, flags severe profanity used aggressively (default:
+          true)'
+        example: true
+        type: boolean
+      exclude_threats:
+        description: 'If true, flags threats of violence or harm (default: true)'
+        example: true
+        type: boolean
+      forbidden_words:
+        description: Words or phrases that should be flagged (case-insensitive)
+        example:
+        - crypto
+        - NFT
+        - hustlegrindset
+        items:
+          type: string
+        type: array
+      professional_check:
+        description: If true, flags unprofessional language or tone
+        example: true
+        type: boolean
+      tone:
+        description: Expected tone. Tweets deviating significantly from this tone
+          will be flagged
+        example: respectful and thoughtful
+        type: string
+    type: object
+  model.StoredFile:
+    properties:
+      content_type:
+        type: string
+      created_at:
+        type: string
+      id:
+        type: string
+      original_name:
+        type: string
+      size:
+        type: integer
+      storage_backend:
+        type: string
+      url:
+        type: string
+    type: object
+  model.UploadResponse:
+    properties:
+      file:
+        $ref: '#/definitions/model.StoredFile'
+      job_id:
+        type: string
+    type: object
+info:
+  contact: {}
+paths:
+  /jobs/{id}:
+    get:
+      description: Retrieves the current status and progress of a processing job.
+        The response includes processing statistics (processed_count, total_count,
+        gemini_calls, flagged_count) and the moderation criteria used for this job.
+      parameters:
+      - description: Job ID from upload response
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Job status with progress metrics and criteria
+          schema:
+            $ref: '#/definitions/model.Job'
+        "400":
+          description: Bad request - job id required
+          schema:
+            type: string
+        "404":
+          description: Job not found
+          schema:
+            type: string
+      summary: Get job status
+      tags:
+      - jobs
+  /tweets:
+    get:
+      consumes:
+      - application/json
+      description: 'Retrieves a paginated list of flagged tweets. **IMPORTANT:** After
+        uploading an archive, use the job_id from the upload response to view tweets
+        from that specific job. Example: GET /tweets?job_id=abc123'
+      parameters:
+      - description: Job ID from upload response (required to view tweets from your
+          archive)
+        in: query
+        name: job_id
+        type: string
+      - description: Page number (default 1)
+        in: query
+        name: page
+        type: integer
+      - description: Items per page (default 20, max 100)
+        in: query
+        name: page_size
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: List of flagged tweets with pagination
+          schema:
+            $ref: '#/definitions/model.ListTweetsResponse'
+        "500":
+          description: Internal server error
+          schema:
+            type: string
+      summary: List flagged tweets
+      tags:
+      - tweets
+  /tweets/export:
+    get:
+      consumes:
+      - application/json
+      description: 'Exports URLs of flagged tweets for manual deletion. **IMPORTANT:**
+        Use job_id from upload response to export tweets from your processed archive.
+        Example: GET /tweets/export?job_id=abc123&format=csv'
+      parameters:
+      - description: Job ID from upload response (required to export tweets from your
+          archive)
+        in: query
+        name: job_id
+        type: string
+      - description: 'Export format: json or csv (default json)'
+        enum:
+        - json
+        - csv
+        in: query
+        name: format
+        type: string
+      produces:
+      - application/json
+      - text/csv
+      responses:
+        "200":
+          description: CSV response with one URL per line (when format=csv)
+          schema:
+            type: string
+        "500":
+          description: Internal server error
+          schema:
+            type: string
+      summary: Export flagged tweet URLs
+      tags:
+      - tweets
+  /tweets/upload:
+    post:
+      consumes:
+      - multipart/form-data
+      description: 'Uploads a Twitter/X archive for processing. Accepts either: (1)
+        ZIP archive file containing data/tweet.js, or (2) unzipped tweet.js/tweets.js
+        file directly. Optional: Provide custom moderation criteria as JSON in the
+        "criteria" form field. The criteria will be used by Gemini AI to evaluate
+        tweets. Example criteria format: {"criteria": {"forbidden_words": ["crypto",
+        "NFT", "hustlegrindset"], "professional_check": true, "tone": "respectful
+        and thoughtful", "exclude_politics": true}}. Returns a job_id that you can
+        use to check processing status and view flagged tweets. Example workflow:
+        1) POST /tweets/upload with file (and optional criteria), 2) Get job_id from
+        response, 3) Check status at GET /jobs/{job_id}, 4) View tweets at GET /tweets?job_id={job_id}'
+      parameters:
+      - description: Twitter/X archive (ZIP file or unzipped tweet.js/tweets.js file,
+          max 500MB)
+        in: formData
+        name: file
+        required: true
+        type: file
+      - description: 'Optional JSON string with moderation criteria. Example: {\'
+        in: formData
+        name: criteria
+        type: string
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Upload successful - save the job_id from this response to query
+            tweets later
+          schema:
+            $ref: '#/definitions/model.UploadResponse'
+        "400":
+          description: Bad request - file required or too large, or invalid criteria
+            JSON
+          schema:
+            type: string
+        "500":
+          description: Internal server error
+          schema:
+            type: string
+      summary: Upload tweet archive
+      tags:
+      - tweets
+  /tweets/view:
+    get:
+      consumes:
+      - application/json
+      description: Retrieves details of a specific flagged tweet
+      parameters:
+      - description: Flagged tweet ID
+        in: query
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Flagged tweet details
+          schema:
+            $ref: '#/definitions/model.FlaggedTweet'
+        "400":
+          description: Bad request - id parameter required
+          schema:
+            type: string
+        "404":
+          description: Tweet not found
+          schema:
+            type: string
+        "500":
+          description: Internal server error
+          schema:
+            type: string
+      summary: Get flagged tweet by ID
+      tags:
+      - tweets
+swagger: "2.0"

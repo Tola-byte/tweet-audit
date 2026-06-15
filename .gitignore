@@ -1,0 +1,46 @@
+# Environment variables
+.env
+
+# Database files
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+
+# Runtime data (uploaded archives, generated DB)
+data/
+cmd/tweet-audit/data/
+
+# Uploaded tweet archives
+data/uploads/*.js
+data/uploads/*.zip
+cmd/tweet-audit/data/uploads/*.js
+cmd/tweet-audit/data/uploads/*.zip
+
+# Binary executables
+tweet-audit
+/tweet-audit
+
+# Test coverage
+*.out
+coverage.html
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.log
